@@ -13,8 +13,8 @@ import java.util.Properties;
 import java.util.function.Supplier;
 
 /**
- * Consider this as a snipet for creation Jsch session object with asymetric encryption. No test provided as will need a mock sftp server.
- * But it is a working code. However you should test it.
+ * Consider this as a snipet for creating a Jsch session object with asymmetric encryption.
+ * No test provided as we may need a mock sftp server. So try it before.
  * @Author : bfayette
  *
  */
