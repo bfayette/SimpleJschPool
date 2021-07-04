@@ -7,13 +7,13 @@ import com.jcraft.jsch.Session;
 import com.jcraft.jsch.SftpException;
 import lombok.Generated;
 import lombok.SneakyThrows;
+import lombok.Value;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -23,28 +23,29 @@ import static java.text.MessageFormat.format;
 
 @Slf4j
 @Generated
-public class SimpleJschPool implements RemovalListener<Integer, ChannelSftp>, AutoCloseable {
-    protected transient final AtomicInteger ticketsGenerator = new AtomicInteger(0);
-    protected transient final Set<Integer> inUseTickets = new CopyOnWriteArraySet<>();
+public class SimpleJschPool implements RemovalListener<Number, ChannelSftp>, AutoCloseable {
+    protected transient final Set<Number> inUseTickets = new CopyOnWriteArraySet<>();
     protected transient final AtomicReference<Session> sshSession = new AtomicReference<>();
-    protected transient LoadingCache<Integer, ChannelSftp> cache;
+    protected transient LoadingCache<Number, ChannelSftp> cache;
     protected transient Semaphore semaphore;
 
+    protected transient final PoolConfig poolConfig;
+    protected transient final Supplier<Number> ticketsProvider;
     private transient final Supplier<Session> sessionProvider;
-    private transient final int maxOpenedChannels;
-    private transient final long waitingTimeInMs;
 
-    public SimpleJschPool(final Supplier<Session> sessionProvider, final int maxOpenedChannels, final long waitingTimeInMs) {
+
+    public SimpleJschPool(final Supplier<Number> ticketsProvider, final Supplier<Session> sessionProvider,
+                          final PoolConfig poolConfig) {
+        this.ticketsProvider = ticketsProvider;
         this.sessionProvider = sessionProvider;
-        this.maxOpenedChannels = maxOpenedChannels;
-        this.waitingTimeInMs = waitingTimeInMs;
+        this.poolConfig = poolConfig;
         this.init();
     }
 
-    public ChannelSftp get(final Integer key) {
+    public ChannelSftp get(final Number key) {
         var channelSftp = this.cache.getUnchecked(key);
         if (isNotConnected(channelSftp)) {
-            log.debug("Invalidate entry then try to load another connection");
+            log.debug("Invalidate entry then try to load with another connection");
             this.invalidate(key);
             channelSftp = this.cache.getUnchecked(key);
         }
@@ -53,14 +54,14 @@ public class SimpleJschPool implements RemovalListener<Integer, ChannelSftp>, Au
     }
 
     @SneakyThrows
-    public int generateTicket() {
-        final var maxOpenedChannels = this.maxOpenedChannels;
-        final var enter = this.semaphore.tryAcquire(this.waitingTimeInMs, TimeUnit.MILLISECONDS);
+    public Number generateTicket() {
+        final var maxOpenedChannels = this.poolConfig.getMaxOpenedChannels();
+        final var waitingTimeInMs = this.poolConfig.getWaitingTimeInMs();
+        final var enter = this.semaphore.tryAcquire(waitingTimeInMs, TimeUnit.MILLISECONDS);
         if (enter) {
             try {
                 final var ticket = IntStream.of(0, maxOpenedChannels)
-                        .mapToObj(attempt -> this.ticketsGenerator.incrementAndGet() % maxOpenedChannels)
-                        .map(Math::abs)
+                        .mapToObj(attempt -> this.ticketsProvider.get())
                         .filter(Predicate.not(SimpleJschPool.this.inUseTickets::contains))
                         .findFirst().orElseThrow();
                 this.inUseTickets.add(ticket);
@@ -78,7 +79,7 @@ public class SimpleJschPool implements RemovalListener<Integer, ChannelSftp>, Au
     }
 
 
-    public void invalidate(final Integer key) {
+    public void invalidate(final Number key) {
         try {
             this.inUseTickets.remove(key);
         } finally {
@@ -87,14 +88,13 @@ public class SimpleJschPool implements RemovalListener<Integer, ChannelSftp>, Au
     }
 
 
-    public void releaseTicket(final Integer key) {
+    public void releaseTicket(final Number key) {
         try {
             log.debug("Release Ticket.");
             if (inUseTickets.contains(key)) {
                 semaphore.release();
             }
         } finally {
-            this.ticketsGenerator.decrementAndGet();
             this.inUseTickets.remove(key);
         }
     }
@@ -104,7 +104,7 @@ public class SimpleJschPool implements RemovalListener<Integer, ChannelSftp>, Au
     }
 
     @Override
-    public void onRemoval(final RemovalNotification<Integer, ChannelSftp> notification) {
+    public void onRemoval(final RemovalNotification<Number, ChannelSftp> notification) {
         try {
             log.debug("Remove a channel. Cache auto cleanup");
             final var channelSftp = notification.getValue();
@@ -121,7 +121,7 @@ public class SimpleJschPool implements RemovalListener<Integer, ChannelSftp>, Au
         if (session == null || !session.isConnected()) {
             final var electedSession = sessionProvider.get();
             if (this.sshSession.compareAndSet(session, electedSession)) {
-                log.debug("The lucky thread connect the elected mft session for anyone else.");
+                log.debug("The lucky thread connects the elected mft session for anyone else.");
                 electedSession.connect();
             }
         }
@@ -148,7 +148,6 @@ public class SimpleJschPool implements RemovalListener<Integer, ChannelSftp>, Au
     public void close() {
         log.debug("Cache cleanup general.");
         try {
-            this.ticketsGenerator.lazySet(0);
             this.releaseAll();
         } finally {
             this.inUseTickets.forEach(this::invalidate);
@@ -174,10 +173,17 @@ public class SimpleJschPool implements RemovalListener<Integer, ChannelSftp>, Au
     }
 
     private void init() {
-        this.semaphore = new Semaphore(this.maxOpenedChannels, true);
+        final var maxOpenedChannels = this.poolConfig.getMaxOpenedChannels();
+        this.semaphore = new Semaphore(maxOpenedChannels, true);
         this.cache = CacheBuilder.newBuilder()
                 .expireAfterAccess(1, TimeUnit.MINUTES)
                 .removalListener(this)
                 .build(CacheLoader.from(key -> create()));
+    }
+
+    @Value(staticConstructor = "of")
+    static class PoolConfig {
+        private transient final int maxOpenedChannels;
+        private transient final long waitingTimeInMs;
     }
 }

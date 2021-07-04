@@ -43,7 +43,9 @@ class SimpleJschPoolTest extends Assertions {
             return session;
         };
 
-        jschPool = new SimpleJschPool(sessionProvider, 10, 1) {
+        final  var generator = TicketsGenerator.of(10);
+        final var config = SimpleJschPool.PoolConfig.of(10, 1);
+        jschPool = new SimpleJschPool( generator, sessionProvider, config) {
             @Override
             @SneakyThrows
             ChannelSftp create() {
@@ -95,7 +97,7 @@ class SimpleJschPoolTest extends Assertions {
     }
 
     @Test()
-    void generate_tickets_after_session_deconnected() throws JSchException {
+    void generate_tickets_after_session_deconnected() {
 
         try {
             var session = jschPool.getSshSession();
@@ -166,30 +168,6 @@ class SimpleJschPoolTest extends Assertions {
             jschPool.generateTicket();
             jschPool.releaseAll();
             assertThat(jschPool.availableTickets()).isEqualTo(nbtickets);
-        } finally {
-            jschPool.close();
-        }
-    }
-
-    @Test
-    void cleanup_cache_generator_reset() {
-        var ticketsGeneratorInternal = jschPool.ticketsGenerator;
-        assertThat(ticketsGeneratorInternal.get()).isZero();
-        int max = jschPool.availableTickets();
-        IntStream.range(0, max).forEach(key -> jschPool.generateTicket());
-        assertThat(ticketsGeneratorInternal.get()).isPositive();
-        jschPool.close();
-        assertThat(ticketsGeneratorInternal.get()).isZero();
-    }
-
-    @Test
-    void ticket_value_always_positive_number_but_less_than_max_opened_channels() {
-        try {
-            var nbtickets = jschPool.availableTickets();
-            var generator = jschPool.ticketsGenerator;
-            generator.set(Integer.MIN_VALUE);
-            var result = IntStream.of(0, 10).mapToObj(attempt -> jschPool.generateTicket()).collect(Collectors.toList());
-            assertThat(result).allMatch(Range.closedOpen(0, nbtickets)::contains);
         } finally {
             jschPool.close();
         }
