@@ -29,13 +29,20 @@ public class SimpleJschPool implements RemovalListener<Number, ChannelSftp>, Aut
 
     protected final PoolConfig poolConfig;
     protected final Supplier<Number> ticketsProvider;
+    protected final PoolModerator moderator;
     private final Supplier<Session> sessionProvider;
 
     public SimpleJschPool(final Supplier<Number> ticketsProvider, final Supplier<Session> sessionProvider,
                           final PoolConfig poolConfig) {
+        this(ticketsProvider, sessionProvider, poolConfig, new ModeratorImpl());
+    }
+
+    public SimpleJschPool(final Supplier<Number> ticketsProvider, final Supplier<Session> sessionProvider,
+                          final PoolConfig poolConfig, final PoolModerator moderator) {
         this.ticketsProvider = ticketsProvider;
         this.sessionProvider = sessionProvider;
         this.poolConfig = poolConfig;
+        this.moderator = moderator;
         this.init();
     }
 
@@ -51,28 +58,20 @@ public class SimpleJschPool implements RemovalListener<Number, ChannelSftp>, Aut
     }
 
     public Number generateTicket() {
-        final var maxOpenedChannels = this.poolConfig.getMaxOpenedChannels();
-        final var waitingTimeInMs = this.poolConfig.getWaitingTimeInMs();
-        boolean enter;
-        try {
-            enter = this.semaphore.tryAcquire(waitingTimeInMs, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted while waiting for ticket", e);
-        }
-        if (enter) {
-            try {
-                final var ticket = IntStream.of(0, maxOpenedChannels)
-                        .mapToObj(attempt -> this.ticketsProvider.get())
-                        .filter(Predicate.not(SimpleJschPool.this.inUseTickets::contains))
-                        .findFirst().orElseThrow();
-                this.inUseTickets.add(ticket);
-                return ticket;
-            } catch (RuntimeException exception) {
-                log.debug("release as no ticket created");
-                this.semaphore.release();
-                throw exception;
-            }
+        var maxOpenedChannels = this.poolConfig.getMaxOpenedChannels();
+        var waitingTimeInMs = this.poolConfig.getWaitingTimeInMs();
+
+        var ticket = this.moderator.tryGrantTicket(
+                this.ticketsProvider,
+                this.inUseTickets,
+                this.semaphore,
+                maxOpenedChannels,
+                waitingTimeInMs
+        );
+
+        if (ticket != null) {
+            this.inUseTickets.add(ticket);
+            return ticket;
         } else {
             throw new IllegalStateException(
                     format("No ticket available. Increase pool channels max size. Context :[inUse={0} max={1}]",
@@ -80,30 +79,24 @@ public class SimpleJschPool implements RemovalListener<Number, ChannelSftp>, Aut
         }
     }
 
-
     public void invalidate(final Number key) {
         try {
-            this.inUseTickets.remove(key);
-        } finally {
+            this.moderator.releaseTicket(key, this.inUseTickets, this.semaphore);
             this.cache.invalidate(key);
+        } catch (Exception e) {
+            log.warn("Failed to invalidate ticket {}", key, e);
         }
     }
 
 
     public void releaseTicket(final Number key) {
-        try {
-            log.debug("Release Ticket.");
-            if (inUseTickets.contains(key)) {
-                semaphore.release();
-            }
-        } finally {
-            this.inUseTickets.remove(key);
-        }
+        this.moderator.releaseTicket(key, this.inUseTickets, this.semaphore);
     }
 
     public int availableTickets() {
-        return semaphore.availablePermits();
+        return this.moderator.availableTickets(this.semaphore);
     }
+
 
     @Override
     public void onRemoval(final RemovalNotification<Number, ChannelSftp> notification) {
@@ -135,7 +128,7 @@ public class SimpleJschPool implements RemovalListener<Number, ChannelSftp>, Aut
 
 
     public void releaseAll() {
-        this.semaphore.release(inUseTickets.size());
+        this.moderator.releaseTicket(null, this.inUseTickets, this.semaphore);
         this.inUseTickets.clear();
     }
 

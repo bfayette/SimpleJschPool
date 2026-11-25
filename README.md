@@ -6,6 +6,7 @@ A Java library for managing SSH/SFTP connection pools using the JSch library. Pr
 
 - **Connection pooling**: Manage a pool of SFTP channels with configurable size
 - **Ticket-based access**: Control concurrent access using tickets/semaphores
+- **Moderator pattern**: Access control is explicit and centralized via `PoolModerator` interface
 - **Automatic cleanup**: Channels are automatically disconnected when removed from cache
 - **Session sharing**: Share a single SSH session across multiple connections
 - **Expiration**: Cache entries expire after access timeout
@@ -65,6 +66,40 @@ try (var pool = new SimpleJschPool(ticketsProvider, sessionProvider, config.Pool
     pool.releaseTicket(ticket);
 }
 ```
+
+## Moderator Pattern
+
+The library now implements the **moderator pattern** for access control. This is a hard truth about the original design: without an explicit moderator, access control was implicit — scattered across `semaphore.tryAcquire()`, `inUseTickets.contains()` checks, and ticket filtering logic across multiple methods.
+
+The `PoolModerator` interface centralizes this logic, making the access control flow obvious and localizable:
+
+- `tryGrantTicket()` — attempts to grant a ticket, combining semaphore acquisition + unused-ticket validation
+- `releaseTicket()` — releases the semaphore permit and removes the ticket from the in-use set
+- `isTicketInUse()` — checks if a ticket is currently held
+- `availableTickets()` — returns available permits from the semaphore
+
+You can provide your own moderator implementation by implementing `PoolModerator` and passing it to `SimpleJschPool` constructor:
+
+```java
+// Default moderator (behavior unchanged)
+var pool = new SimpleJschPool(ticketsProvider, sessionProvider, poolConfig);
+
+// Custom moderator with additional validation
+var customPool = new SimpleJschPool(ticketsProvider, sessionProvider, poolConfig, new CustomModerator());
+```
+
+### `SimpleJschPool`
+
+- `generateTicket()` — generates a ticket through the moderator (semaphore + unused validation)
+- `get(Number key)` — Get an SFTP channel by ticket
+- `releaseTicket(Number key)` — Release a ticket via the moderator
+- `availableTickets()` — Get number of available tickets (from moderator)
+- `releaseAll()` — Release all tickets
+- `close()` — Close the pool and release all resources
+
+### `PoolModerator`
+
+Interface for custom access control logic. See `org.fbreton.jsch.PoolModerator` for the full API.
 
 ## API
 
