@@ -1,0 +1,113 @@
+# SimpleJschPool
+
+A Java library for managing SSH/SFTP connection pools using the JSch library. Provides a reusable, thread-safe pool of SFTP channels with ticket-based access, automatic cleanup, and connection lifecycle management.
+
+## Features
+
+- **Connection pooling**: Manage a pool of SFTP channels with configurable size
+- **Ticket-based access**: Control concurrent access using tickets/semaphores
+- **Automatic cleanup**: Channels are automatically disconnected when removed from cache
+- **Session sharing**: Share a single SSH session across multiple connections
+- **Expiration**: Cache entries expire after access timeout
+- **Resource safety**: Proper disconnection on `close()` and error handling
+
+## Installation
+
+This project uses Maven. Add the dependency to your `pom.xml`:
+
+```xml
+<dependency>
+    <groupId>org.fbreton.jsch</groupId>
+    <artifactId>ssh-cache</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+</dependency>
+```
+
+Or install locally:
+
+```bash
+mvn install
+```
+
+## Quick Start
+
+```java
+import org.fbreton.jsch.SimpleJschPool;
+import org.fbreton.jsch.JschSessionProvider;
+import org.fbreton.jsch.SftpPropertiesConfig;
+
+// Configure SFTP properties
+var config = SftpPropertiesConfig.builder()
+    .username("user")
+    .host("example.com")
+    .port(22)
+    .privateKey(Files.readString(Paths.get("path/to/key")))
+    .serverAliveInterval(30000)
+    .build();
+
+// Create a session provider
+var sessionProvider = new JschSessionProvider(config);
+
+// Create ticket generator
+var ticketsProvider = TicketsGenerator.of(10);
+
+// Create the pool
+try (var pool = new SimpleJschPool(ticketsProvider, sessionProvider, config.PoolConfig.of(10, 1))) {
+    // Get an SFTP channel using a ticket
+    var ticket = pool.generateTicket();
+    var sftpChannel = pool.get(ticket);
+
+    // Use the SFTP channel...
+    // sftpChannel.put(...);
+    // sftpChannel.get(...);
+
+    // Release the ticket when done
+    pool.releaseTicket(ticket);
+}
+```
+
+## API
+
+### `SimpleJschPool`
+
+- `generateTicket()` - Generate a ticket for channel access
+- `get(Number key)` - Get an SFTP channel by ticket
+- `releaseTicket(Number key)` - Release a ticket
+- `availableTickets()` - Get number of available tickets
+- `releaseAll()` - Release all tickets
+- `close()` - Close the pool and release all resources
+
+### `SftpPropertiesConfig`
+
+- `username` - SSH username
+- `host` - SSH host
+- `port` - SSH port (default: 22)
+- `privateKey` - Private key for authentication
+- `serverAliveInterval` - Server alive interval in milliseconds
+
+### `PoolConfig`
+
+- `maxOpenedChannels` - Maximum number of concurrent channels
+- `waitingTimeInMs` - Waiting time in milliseconds for ticket acquisition
+
+## Development
+
+### Building
+
+```bash
+mvn compile       # Compile the project
+mvn test          # Run tests
+mvn package       # Create JAR
+```
+
+### Project Structure
+
+- `SimpleJschPool.java` - Main pool implementation with cache, semaphore, and removal listener
+- `JschSessionProvider.java` - Creates JSch sessions with asymmetric encryption
+- `SftpPropertiesConfig.java` - Configuration class for SFTP properties
+- `TicketsGenerator.java` - Generates integer tickets for channel access
+- Test files in `src/test/java/`
+
+## License
+
+This project is open source. See the project repository for license details.

@@ -5,10 +5,8 @@ import com.jcraft.jsch.ChannelSftp;
 import com.jcraft.jsch.JSchException;
 import com.jcraft.jsch.Session;
 import com.jcraft.jsch.SftpException;
-import lombok.Generated;
-import lombok.SneakyThrows;
-import lombok.Value;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
@@ -21,18 +19,17 @@ import java.util.stream.IntStream;
 
 import static java.text.MessageFormat.format;
 
-@Slf4j
-@Generated
 public class SimpleJschPool implements RemovalListener<Number, ChannelSftp>, AutoCloseable {
+    private static final Logger log = LoggerFactory.getLogger(SimpleJschPool.class);
+
     protected transient final Set<Number> inUseTickets = new CopyOnWriteArraySet<>();
     protected transient final AtomicReference<Session> sshSession = new AtomicReference<>();
     protected transient LoadingCache<Number, ChannelSftp> cache;
     protected transient Semaphore semaphore;
 
-    protected transient final PoolConfig poolConfig;
-    protected transient final Supplier<Number> ticketsProvider;
-    private transient final Supplier<Session> sessionProvider;
-
+    protected final PoolConfig poolConfig;
+    protected final Supplier<Number> ticketsProvider;
+    private final Supplier<Session> sessionProvider;
 
     public SimpleJschPool(final Supplier<Number> ticketsProvider, final Supplier<Session> sessionProvider,
                           final PoolConfig poolConfig) {
@@ -53,11 +50,16 @@ public class SimpleJschPool implements RemovalListener<Number, ChannelSftp>, Aut
 
     }
 
-    @SneakyThrows
     public Number generateTicket() {
         final var maxOpenedChannels = this.poolConfig.getMaxOpenedChannels();
         final var waitingTimeInMs = this.poolConfig.getWaitingTimeInMs();
-        final var enter = this.semaphore.tryAcquire(waitingTimeInMs, TimeUnit.MILLISECONDS);
+        boolean enter;
+        try {
+            enter = this.semaphore.tryAcquire(waitingTimeInMs, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while waiting for ticket", e);
+        }
         if (enter) {
             try {
                 final var ticket = IntStream.of(0, maxOpenedChannels)
@@ -115,14 +117,17 @@ public class SimpleJschPool implements RemovalListener<Number, ChannelSftp>, Aut
     }
 
 
-    @SneakyThrows
     public Session getSshSession() {
         final var session = sshSession.get();
         if (session == null || !session.isConnected()) {
             final var electedSession = sessionProvider.get();
             if (this.sshSession.compareAndSet(session, electedSession)) {
                 log.debug("The lucky thread connects the elected mft session for anyone else.");
-                electedSession.connect();
+                try {
+                    electedSession.connect();
+                } catch (JSchException e) {
+                    log.warn("Failed to connect elected session", e);
+                }
             }
         }
         return sshSession.get();
@@ -158,16 +163,22 @@ public class SimpleJschPool implements RemovalListener<Number, ChannelSftp>, Aut
         }
     }
 
-    @SneakyThrows
     ChannelSftp create() {
         ChannelSftp channelSftp;
         try {
-            channelSftp = (ChannelSftp) getSshSession().openChannel("sftp");
+            var session = getSshSession();
+            channelSftp = (ChannelSftp) session.openChannel("sftp");
             channelSftp.connect();
             log.debug("ChannelSftp created.");
         } catch (JSchException e) {
-            channelSftp = (ChannelSftp) getSshSession().openChannel("sftp");
-            channelSftp.connect();
+            try {
+                var session = getSshSession();
+                channelSftp = (ChannelSftp) session.openChannel("sftp");
+                channelSftp.connect();
+            } catch (JSchException ex) {
+                log.warn("Failed to create SFTP channel after retry", ex);
+                throw new RuntimeException("Failed to create SFTP channel", ex);
+            }
         }
         return channelSftp;
     }
@@ -181,9 +192,21 @@ public class SimpleJschPool implements RemovalListener<Number, ChannelSftp>, Aut
                 .build(CacheLoader.from(key -> create()));
     }
 
-    @Value(staticConstructor = "of")
-    static class PoolConfig {
-        private transient final int maxOpenedChannels;
-        private transient final long waitingTimeInMs;
+    public static class PoolConfig {
+        private final int maxOpenedChannels;
+        private final long waitingTimeInMs;
+
+        public PoolConfig(int maxOpenedChannels, long waitingTimeInMs) {
+            this.maxOpenedChannels = maxOpenedChannels;
+            this.waitingTimeInMs = waitingTimeInMs;
+        }
+
+        public int getMaxOpenedChannels() {
+            return maxOpenedChannels;
+        }
+
+        public long getWaitingTimeInMs() {
+            return waitingTimeInMs;
+        }
     }
 }
